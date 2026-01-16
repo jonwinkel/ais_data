@@ -275,16 +275,8 @@
 
       const hasStaticNav = (navDates && typeof navDates === 'object' && Object.keys(navDates).length > 0);
 
-      // Determine which map type we're looking for based on the current filename.
-      const currentFile = (window.location && window.location.pathname)
-        ? (window.location.pathname.split('/').pop() || '')
-        : '';
-      const mapPrefix = currentFile.startsWith('spoofing_jumps_map_')
-        ? 'spoofing_jumps_map_'
-        : (currentFile.startsWith('jumping_vessels_map_') ? 'jumping_vessels_map_' : null);
-
-      // If we have neither a static manifest nor a recognizable filename prefix, hide the widget.
-      if (!hasStaticNav && !mapPrefix) return;
+      // Static-only navigation requires a manifest to resolve URLs.
+      if (!hasStaticNav) return;
       calRoot.style.display = 'block';
 
       const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -321,121 +313,16 @@
           cell.className = 'day' + (url ? ' available' : '');
           if (currentIso && iso === currentIso) cell.className += ' selected';
           cell.textContent = String(d);
-          if (url) {
-            cell.title = 'Open ' + iso;
-            cell.addEventListener('click', () => {
-              try { window.location.assign(url); } catch (e) { window.location.href = url; }
-            });
-          }
+          cell.title = url ? ('Open ' + iso) : ('No map available for ' + iso);
+          cell.addEventListener('click', () => {
+            if (!url) {
+              statusShow('No map HTML available for ' + iso + '.');
+              return;
+            }
+            try { window.location.assign(url); } catch (e) { window.location.href = url; }
+          });
           calDays.appendChild(cell);
         }
-      }
-
-      // Dynamic discovery: when served over http(s), we can probe for neighboring
-      // html files without regenerating this page.
-      async function dynamicDiscoverMonth(y, m) {
-        if (!mapPrefix) return;
-        const proto = (window.location && window.location.protocol) ? window.location.protocol : '';
-        if (proto !== 'http:' && proto !== 'https:') {
-          // file:// origin generally cannot fetch sibling files due to browser security.
-          return;
-        }
-
-        function dirSingleDay(y1, m1, d1) {
-          return y1 + '_' + pad2(m1 + 1) + '_' + pad2(d1);
-        }
-
-        function dirIsoRange(startDt, endDt) {
-          const s = startDt.getUTCFullYear() + '-' + pad2(startDt.getUTCMonth() + 1) + '-' + pad2(startDt.getUTCDate());
-          const e = endDt.getUTCFullYear() + '-' + pad2(endDt.getUTCMonth() + 1) + '-' + pad2(endDt.getUTCDate());
-          return s + '--' + e;
-        }
-
-        function parseDirRange(name) {
-          // ISO single-day: YYYY_MM_DD
-          let mm = name.match(/^(\d{4})_(\d{2})_(\d{2})$/);
-          if (mm) {
-            const y1 = parseInt(mm[1], 10);
-            const m1 = parseInt(mm[2], 10) - 1;
-            const d1 = parseInt(mm[3], 10);
-            const dt = new Date(Date.UTC(y1, m1, d1));
-            return { start: dt, end: dt };
-          }
-
-          // ISO range: YYYY-MM-DD--YYYY-MM-DD
-          mm = name.match(/^(\d{4})-(\d{2})-(\d{2})--(\d{4})-(\d{2})-(\d{2})$/);
-          if (mm) {
-            const y1 = parseInt(mm[1], 10);
-            const m1 = parseInt(mm[2], 10) - 1;
-            const d1 = parseInt(mm[3], 10);
-            const y2 = parseInt(mm[4], 10);
-            const m2 = parseInt(mm[5], 10) - 1;
-            const d2 = parseInt(mm[6], 10);
-            return { start: new Date(Date.UTC(y1, m1, d1)), end: new Date(Date.UTC(y2, m2, d2)) };
-          }
-
-          return null;
-        }
-        function addRangeToNav(range, url) {
-          // Highlight only the *start* date for a range.
-          const iso = isoFor(range.start.getUTCFullYear(), range.start.getUTCMonth(), range.start.getUTCDate());
-          navDates[iso] = url;
-        }
-
-        const daysInMonth = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
-        const candidates = new Set();
-
-        // Probe single-day directories (YYYY_MM_DD).
-        for (let d = 1; d <= daysInMonth; d++) {
-          candidates.add(dirSingleDay(y, m, d));
-        }
-
-        // Probe common range window lengths (YYYY-MM-DD--YYYY-MM-DD).
-        // This avoids needing directory listings while still matching typical grouping.
-        const windowLens = [2, 3, 4, 5, 6, 7];
-        for (let d = 1; d <= daysInMonth; d++) {
-          const start = new Date(Date.UTC(y, m, d));
-          for (const len of windowLens) {
-            const end = new Date(start.getTime());
-            end.setUTCDate(end.getUTCDate() + (len - 1));
-            candidates.add(dirIsoRange(start, end));
-          }
-        }
-
-        async function exists(url) {
-          try {
-            const r = await fetch(url, { method: 'HEAD', cache: 'no-store' });
-            return !!(r && r.ok);
-          } catch (e) {
-            return false;
-          }
-        }
-
-        let changed = false;
-        // Probe in parallel, but cap concurrency via a simple queue.
-        const names = Array.from(candidates);
-        const maxConcurrent = 8;
-        let i = 0;
-        async function worker() {
-          while (i < names.length) {
-            const name = names[i++];
-            const rel1 = '../' + name + '/' + mapPrefix + name + '.html';
-            const rel2 = '../' + name + '/outputs/' + mapPrefix + name + '.html';
-            let url = null;
-            if (await exists(rel1)) url = rel1;
-            else if (await exists(rel2)) url = rel2;
-            if (!url) continue;
-
-            const range = parseDirRange(name);
-            if (!range) continue;
-            addRangeToNav(range, url);
-            changed = true;
-          }
-        }
-        const workers = [];
-        for (let w = 0; w < maxConcurrent; w++) workers.push(worker());
-        await Promise.all(workers);
-        if (changed) render();
       }
 
       function shiftMonth(delta) {
@@ -443,15 +330,11 @@
         viewYear = dt.getUTCFullYear();
         viewMonth = dt.getUTCMonth();
         render();
-        // Refresh highlights when the month view changes.
-        dynamicDiscoverMonth(viewYear, viewMonth);
       }
 
       calPrev.addEventListener('click', () => shiftMonth(-1));
       calNext.addEventListener('click', () => shiftMonth(1));
       render();
-      // On load, attempt dynamic discovery to include newly generated neighbors.
-      dynamicDiscoverMonth(viewYear, viewMonth);
     })();
 
     // If Cesium.js didn't load, avoid ReferenceErrors and show an actionable message.
@@ -793,7 +676,7 @@
             material: color,
             arcType: Cesium.ArcType.GEODESIC,
             granularity: Cesium.Math.RADIANS_PER_DEGREE / 30,
-            // Clamp to the globe surface so the path occludes correctly.
+            // Keep as a regular polyline for performance; depth testing will still occlude it.
             clampToGround: false,
           },
         });
@@ -819,8 +702,7 @@
             rotation: Cesium.Math.toRadians(-rotDeg),
             // Align "up" with local north, not screen up, so heading is map-correct.
             alignedAxis: northAxis,
-            // Keep markers on the surface and allow the globe to occlude them.
-verticalOrigin: Cesium.VerticalOrigin.CENTER,
+            verticalOrigin: Cesium.VerticalOrigin.CENTER,
             horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
             // Do not disable depth testing; otherwise markers show through the Earth.
             disableDepthTestDistance: 0.0,
